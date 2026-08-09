@@ -51,6 +51,8 @@ w.bind( "compute", ( a, b ) => {
 	return a * b;
 } );
 
+w.bind( 'webview', () => { return true; } );
+
 w.setHtml( html );
 w.run();
 w.destroy();
