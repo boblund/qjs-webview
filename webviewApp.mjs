@@ -14,6 +14,10 @@ const html = `
   <button id="compute">Compute</button>
   <span>Result: <span id="computeResult">(not started)</span></span>
 </div>
+<hr />
+<div>
+	<label for="random">Random number: </label><output label="random"></output>
+</div>
 <script type="module">
   const getElements = ids => Object.assign({}, ...ids.map(
     id => ({ [id]: document.getElementById(id) })));
@@ -33,11 +37,17 @@ const html = `
     ui.computeResult.textContent = await window.compute(6, 7);
     ui.compute.disabled = false;
   });
+	window.updateRandom = ( n ) => {
+		document.querySelector( 'output' ).innerHTML = n;
+	}
+	window.addEventListener("DOMContentLoaded", () => {
+		window.ready();
+	});
 </script>`;
 
 const w = new Webview( 1 );
 w.setTitle( "Bind Example" );
-w.setSize( 480, 320 );
+w.setSize( 600, 400 );
 
 // state that lived in context_t.count is just a closure variable here
 let count = 0;
@@ -52,6 +62,12 @@ w.bind( "compute", ( a, b ) => {
 } );
 
 w.bind( 'webview', () => { return true; } );
+
+w.bind( "ready", () => { update(); } );
+
+function update(){
+	w.eval( `updateRandom( ${ parseInt( Math.random() * 1000 ) } )` );
+}
 
 w.setHtml( html );
 w.run();
