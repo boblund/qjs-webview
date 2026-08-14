@@ -1,7 +1,27 @@
 #include "quickjs.h"
+#include "js_dispatch.h"
 #include "webview.h"
 #include <string.h>
 #include <stdlib.h>
+
+/* --- event loop dispatcher called from C module --- */
+
+static webview_t g_dispatch_w = NULL;   /* single-webview assumption for now */
+
+typedef struct { js_dispatch_fn fn; void *arg; } dispatch_wrap_t;
+
+static void webview_dispatch_trampoline(webview_t w, void *arg) {
+    dispatch_wrap_t *dw = (dispatch_wrap_t *)arg;
+    dw->fn(dw->arg);
+    free(dw);
+}
+
+static void webview_dispatch_impl(js_dispatch_fn fn, void *arg) {
+    dispatch_wrap_t *dw = malloc(sizeof(*dw));
+    dw->fn = fn;
+    dw->arg = arg;
+    webview_dispatch(g_dispatch_w, webview_dispatch_trampoline, dw);
+}
 
 static JSClassID js_webview_class_id;
 
@@ -50,6 +70,9 @@ static JSValue js_webview_ctor(JSContext *ctx, JSValueConst new_target,
 
     webview_t w = webview_create(debug, NULL);
     if (!w) return JS_ThrowInternalError(ctx, "webview_create failed");
+
+		g_dispatch_w = w;
+    js_dispatch_set_impl(webview_dispatch_impl);
 
     webview_data_t *data = malloc(sizeof(webview_data_t));
     data->w = w;
