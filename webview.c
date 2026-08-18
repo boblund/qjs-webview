@@ -1,8 +1,12 @@
 #include "quickjs.h"
-#include "js_dispatch.h"
 #include "webview.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
+#include <pthread.h>
+#include "js_dispatch.h"
+
+static JSClassID js_webview_class_id;
 
 /* --- event loop dispatcher called from C module --- */
 
@@ -23,16 +27,13 @@ static void webview_dispatch_impl(js_dispatch_fn fn, void *arg) {
     webview_dispatch(g_dispatch_w, webview_dispatch_trampoline, dw);
 }
 
-static JSClassID js_webview_class_id;
-
-typedef struct bind_ctx_s bind_ctx_t;
-struct bind_ctx_s {
+typedef struct bind_ctx {
     JSContext  *ctx;
     JSValue     func;
     char       *name;
     webview_t   w;      /* <-- add this, set to data->w in js_webview_bind */
     bind_ctx_t *next;
-};
+} bind_ctx_t;
 
 typedef struct {
     webview_t   w;
@@ -193,7 +194,7 @@ static void bind_callback(const char *seq, const char *req, void *arg) {
     bind_ctx_t *bc = (bind_ctx_t *)arg;
     JSContext *ctx = bc->ctx;
     webview_t w = bc->w;
-		if (!w) return;  /* handle already destroyed, nothing to return a result to */
+    if (!w) return;
 
     JSValue args_val = JS_ParseJSON(ctx, req, strlen(req), "<bind>");
     int argc = 0;
@@ -214,6 +215,14 @@ static void bind_callback(const char *seq, const char *req, void *arg) {
     if (JS_IsException(ret)) {
         status = 1;
         result_val = JS_GetException(ctx);
+    } else if (JS_IsPromise(ret)) {
+        JSContext *ctx1;
+        while (JS_PromiseState(ctx, ret) == JS_PROMISE_PENDING) {
+            int r = JS_ExecutePendingJob(JS_GetRuntime(ctx), &ctx1);
+            if (r <= 0) break;   /* no jobs left but still pending — avoid spinning forever */
+        }
+        if (JS_PromiseState(ctx, ret) == JS_PROMISE_REJECTED) status = 1;
+        result_val = JS_PromiseResult(ctx, ret);
     }
 
     JSValue json = JS_JSONStringify(ctx, result_val, JS_UNDEFINED, JS_UNDEFINED);
@@ -228,7 +237,6 @@ static void bind_callback(const char *seq, const char *req, void *arg) {
     for (int i = 0; i < argc; i++) JS_FreeValue(ctx, argv[i]);
     free(argv);
 
-    /* drain microtasks queued by the callback (promise resolutions etc.) */
     JSContext *ctx1;
     while (JS_ExecutePendingJob(JS_GetRuntime(ctx), &ctx1) > 0);
 }

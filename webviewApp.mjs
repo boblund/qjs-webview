@@ -85,9 +85,9 @@ w.bind( 'brumeLogin', ( username, password ) => {
 	}
 } );
 
-w.bind( 'brumeStart', async ( token ) => {
+w.bind( 'brumeStart', ( token ) => {
 	myName = usernameFromToken( token );
-	wsc = await newWsClient( SIGNAL_URL, token );
+	wsc = newWsClient( SIGNAL_URL, token );
 
 	wsc.on( 'close', ( reason ) => {
 		console.log( `wsc close: ${ JSON.stringify( reason ) }` );
@@ -120,7 +120,7 @@ w.bind( 'brumeStart', async ( token ) => {
 				console.log( `unknown ws message: ${ message }` );
 		}
 	} );
-
+	console.log( `webviewApp.mjs brumeStart myname: ${ myName }` );
 	return myName;
 } );
 
