@@ -1,0 +1,32 @@
+{
+  "name": "qjs-webview",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "build": "webpack",
+		"build:quickjs": "webpack --env quickjs",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/boblund/qjs-webview.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/boblund/qjs-webview/issues"
+  },
+  "homepage": "https://github.com/boblund/qjs-webview#readme",
+  "description": "",
+  "devDependencies": {
+    "@babel/core": "^7.29.7",
+    "@babel/plugin-transform-modules-commonjs": "^7.29.7",
+    "@babel/preset-env": "^7.29.7",
+    "babel-loader": "^10.1.1",
+    "css-loader": "^7.1.4",
+    "ifdef-loader": "^2.3.2",
+    "style-loader": "^4.0.0",
+    "webpack": "^5.109.2",
+    "webpack-cli": "^7.2.2"
+  }
+}

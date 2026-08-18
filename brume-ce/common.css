@@ -1,0 +1,25 @@
+	/*** common appearance between main and shadow DOM ***/
+
+	body{
+		font-family: helvetica, sans-serif;
+		font-size: 15px;
+	}
+
+	button {
+		font-size: 1em;
+		margin-right: 5px;
+		border: 1px solid grey;
+		border-radius: 6px;
+		height: 27px;
+		background-color: #009090;
+		color: white;
+		cursor: pointer;
+	}
+
+	input[type=text],
+	input[type=password]{
+		margin: 5px;
+		height: 2em;
+		font-size: 1em;
+		width: 300px;
+	}

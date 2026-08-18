@@ -1,0 +1,43 @@
+<!-- index.html -->
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Brume Client</title>
+  </head>
+
+  <body class="hidden">
+    <spa-nav>
+      <a href="#" id="login" style="padding: 6; margin-left: 0.75em; font-size: 30px;">&#8962</a>
+      <a href="#" id="p2p" style="display:none;">p2p</a>
+    </spa-nav>
+
+    <div id="pages-container">
+      <div class="login page center-vertical center-horizontal" data-spa="login">
+        <h4>
+          Welcome to the Brume P2P example.
+          </br></br>
+          <brume-login></brume-login>
+        </h4>
+      </div>
+
+      <div class="app page" data-spa="p2p">
+        <div class="row">
+          <brume-call id="call"></brume-call>
+          <div class="idp" style="margin-left: auto; margin-right: 1em;"></div>
+        </div>
+        <div class="app-container hidden">
+          <h3>Message</h3>
+          <div class="output"></div>
+        </div>
+      </div>
+      <ce-dialog></ce-dialog>
+    </div>
+
+    <!-- webpack output, plain script — NOT type="module", per the file:// CORS fix -->
+    <!--script src="./bundle.js"></script-->
+		<script src="dist/bundle.js?v=10"></script>
+		<!-- Script replaced with local server port when brume-test-server used -->
+		<script> window.BRUME_SERVER = undefined; </script>
+  </body>
+</html>

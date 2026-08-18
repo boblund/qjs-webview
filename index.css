@@ -1,0 +1,72 @@
+body {
+	width: 99vw;
+	height: 99vh;
+	overflow: hidden;
+	margin: 0;
+	margin-left: 0.5vw;
+	display: flex;
+	flex-direction: column;
+}
+
+#pages-container {
+	flex-grow: 1; /* Take remaining vertical space */
+	position: relative; /* To position pages absolutely inside */
+	overflow: hidden; /* Hide overflow from stacked pages */
+	border: 1px solid teal;
+}
+.page {
+	display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+	visibility: hidden; /* Hide all pages by default */
+	position: absolute; /* Stack pages on top of each other */
+	top: 0; left: 0; right: 0; bottom: 0;
+	overflow-y: auto; /* Scroll if content overflows */
+}
+
+.page.center-vertical {
+	justify-content: center;
+}
+
+.page.center-horizontal {
+	align-items: center;
+}
+
+.page.active {
+	visibility: visible;
+	position: static;
+}
+
+div[data-spa] {
+	display: flex;
+	padding-top: 1em;
+	margin: 0;
+	width: 98.78vw;
+	height: 100%;
+	flex-direction: column;
+	flex-grow: 1;
+	border: 1px solid #f0f0f0;
+}
+
+.row {
+	display: flex;
+	flex-direction: row;
+	flex-wrap: nowrap;
+	width: 100%;
+}
+
+.app-container {
+	display: flex;
+	flex-direction: column;
+	margin-left: 5px;
+	/*justify-content: flex-start;*/
+}
+
+.hidden{ display: none !important; } /* required to work with flex */
+.center { justify-content: center; }
+.middle { align-items: center; }
+.top { align-items: top; }
+
+brume-call {
+	margin-left: 5px;
+}
