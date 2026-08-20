@@ -18,6 +18,22 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
+#include "js_dispatch.h"
+
+/* ---- dispatch pipe-fallback init/drain, exposed to JS for headless apps ---- */
+
+static JSValue js_dispatch_init(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    int fds[2];
+    if (pipe(fds) != 0) return JS_ThrowInternalError(ctx, "pipe() failed");
+    js_dispatch_init_pipe_fallback(fds[1]);
+    return JS_NewInt32(ctx, fds[0]);
+}
+
+static JSValue js_dispatch_drain(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    js_dispatch_drain_pipe_queue();
+    return JS_UNDEFINED;
+}
+
 #define countof(x) (sizeof(x) / sizeof((x)[0]))
 
 #ifdef JS_SHARED_LIBRARY
@@ -39,13 +55,15 @@ typedef struct {
 		SSL_CTX* ctx;
     int fds[2];
 		void* client_s;
+		bool dispatch;
 } ssl_thread_arg_t;
 
-void create_ssl_thread( SSL* ssl, SSL_CTX* ctx, void* func( void*), int* fds, void* client_data ){
+void create_ssl_thread( SSL* ssl, SSL_CTX* ctx, void* func( void*), int* fds, void* client_data,  bool dispatch ){
   ssl_thread_arg_t* args = malloc( sizeof( ssl_thread_arg_t ) );
   args->ssl = ssl;
 	args->ctx = ctx;
 	args->client_s = client_data;
+	args->dispatch = dispatch;
 
   int to_thread_fds[ 2 ];
   pipe( to_thread_fds );
@@ -68,9 +86,80 @@ void create_ssl_thread( SSL* ssl, SSL_CTX* ctx, void* func( void*), int* fds, vo
 /* Client */
 
 typedef struct {
-		int fds[2];
-		_Atomic int server_ssl_fd;
+    int fds[2];
+    _Atomic int server_ssl_fd;
+    bool dispatch;
+		pthread_mutex_t mode_lock;   /* guards dispatch flag + the decide-and-act pipe/emit choice */
+    JSContext *jsctx;
+    JSValue on_data;
+    pthread_mutex_t on_data_lock;
 } JSClientData;
+
+typedef struct {
+    JSContext *jsctx;
+    JSValue    on_data;
+    uint8_t   *data;
+    uint32_t   len;
+    bool       closed;
+} client_dispatch_event_t;
+
+static void client_dispatch_main_thread(void *arg) {
+    client_dispatch_event_t *ev = (client_dispatch_event_t *)arg;
+    JSContext *ctx = ev->jsctx;
+
+    JSValue arg0;
+    if (ev->closed) {
+        arg0 = JS_NULL;
+    } else {
+        JSValue buf = JS_NewArrayBufferCopy(ctx, ev->data, ev->len);
+        JSValue global = JS_GetGlobalObject(ctx);
+        JSValue u8ctor = JS_GetPropertyStr(ctx, global, "Uint8Array");
+        arg0 = JS_CallConstructor(ctx, u8ctor, 1, (JSValueConst *)&buf);
+        JS_FreeValue(ctx, u8ctor);
+        JS_FreeValue(ctx, global);
+        JS_FreeValue(ctx, buf);
+    }
+
+    JSValue ret = JS_Call(ctx, ev->on_data, JS_UNDEFINED, 1, (JSValueConst *)&arg0);
+    if (JS_IsException(ret)) {
+        JSValue exc = JS_GetException(ctx);
+        const char *msg = JS_ToCString(ctx, exc);
+        fprintf(stderr, "socket dispatch handler threw: %s\n", msg);
+        JS_FreeCString(ctx, msg);
+        JS_FreeValue(ctx, exc);
+    }
+    JS_FreeValue(ctx, ret);
+    JS_FreeValue(ctx, arg0);
+    JS_FreeValue(ctx, ev->on_data);
+
+    JSContext *ctx1;
+    while (JS_ExecutePendingJob(JS_GetRuntime(ctx), &ctx1) > 0);
+
+    free(ev->data);
+    free(ev);
+}
+
+static void client_emit_data(JSClientData *s, const uint8_t *data, uint32_t len, bool closed) {
+    pthread_mutex_lock(&s->on_data_lock);
+    if (JS_IsUndefined(s->on_data)) {
+        pthread_mutex_unlock(&s->on_data_lock);
+        return;
+    }
+    client_dispatch_event_t *ev = malloc(sizeof(*ev));
+    ev->jsctx = s->jsctx;
+    ev->on_data = JS_DupValue(s->jsctx, s->on_data);
+    pthread_mutex_unlock(&s->on_data_lock);
+
+    ev->closed = closed;
+    ev->len = len;
+    if (!closed && len > 0) {
+        ev->data = malloc(len);
+        memcpy(ev->data, data, len);
+    } else {
+        ev->data = NULL;
+    }
+    js_dispatch_to_main(client_dispatch_main_thread, ev);
+}
 
 static JSClassID js_client_class_id;
 
@@ -81,6 +170,12 @@ static void js_client_finalizer(JSRuntime *rt, JSValue val)
 			js_free_rt(rt, s);
 			return;
 		}
+
+		pthread_mutex_lock(&s->on_data_lock);
+    if (!JS_IsUndefined(s->on_data)) JS_FreeValueRT(rt, s->on_data);
+    s->on_data = JS_UNDEFINED;
+    pthread_mutex_unlock(&s->on_data_lock);
+		pthread_mutex_destroy(&s->mode_lock);
 
 		if( s->server_ssl_fd != -1 ){
 				shutdown( s->server_ssl_fd, SHUT_RDWR );
@@ -106,8 +201,10 @@ static JSValue js_client_ctor(JSContext *ctx,
     JSValue proto;
 
     s = js_mallocz(ctx, sizeof(JSClientData));
-    if (!s)
-        return JS_EXCEPTION;
+    if (!s) return JS_EXCEPTION;
+		s->on_data = JS_UNDEFINED;
+    pthread_mutex_init(&s->on_data_lock, NULL);
+		pthread_mutex_init(&s->mode_lock, NULL);
 
     /* using new_target to get the prototype is necessary when the
        class is extended. */
@@ -132,10 +229,14 @@ static JSValue js_client_end(JSContext *ctx, JSValueConst this_val,int argc, JSV
     if (!s) return JS_EXCEPTION;
     if (s == NULL || s->fds[0] < 0 ) return JS_UNDEFINED;
 		//printf( "js_client_end fds: %d %d, server_ssl_fd: %d\n", s->fds[0], s->fds[1], s->server_ssl_fd );
-		if (s->fds[0] < 0) {
-    		//printf("js_client_end: already cleaned up, returning\n");
-				return JS_UNDEFINED;
-		}
+		if (s->fds[0] < 0) return JS_UNDEFINED;
+
+		pthread_mutex_lock(&s->on_data_lock);
+    if (!JS_IsUndefined(s->on_data)) JS_FreeValue(ctx, s->on_data);
+    s->on_data = JS_UNDEFINED;
+    pthread_mutex_unlock(&s->on_data_lock);
+		pthread_mutex_destroy(&s->mode_lock);
+
 		if( s->fds[0] == s->fds[1] ){
 			shutdown(s->fds[0], SHUT_WR); // socket
 		} else {
@@ -184,7 +285,15 @@ void *client_ssl_thread(void *arg) {
 							if(err == SSL_ERROR_SSL || err == SSL_ERROR_SYSCALL) ERR_print_errors_fp(stderr);
 							break;
 						}
-						write( args->fds[1], buf, n );
+
+						JSClientData *cd = (JSClientData *)args->client_s;
+						pthread_mutex_lock(&cd->mode_lock);
+						if (cd->dispatch) {
+								client_emit_data(cd, (uint8_t *)buf, n, false);
+						} else {
+								write( args->fds[1], buf, n );
+						}
+						pthread_mutex_unlock(&cd->mode_lock);
         }
 
         // --- main thread sent a message ---
@@ -204,10 +313,35 @@ void *client_ssl_thread(void *arg) {
 		close( ssl_fd );
 		JSClientData* ptr = (JSClientData*) args->client_s;
 		ptr->server_ssl_fd = -1;
-		//printf( "writing sentinel\n" );
-		char zero = 0;
-		write(args->fds[1], &zero, 1);  // ← sentinel, not empty write
+		pthread_mutex_lock(&ptr->mode_lock);
+		if (ptr->dispatch) {
+				client_emit_data(ptr, NULL, 0, true);
+		} else {
+				char zero = 0;
+				write(args->fds[1], &zero, 1);
+		}
+		pthread_mutex_unlock(&ptr->mode_lock);
     free(args);
+    return NULL;
+}
+
+typedef struct {
+    int fd;
+    JSClientData *client_s;
+} plain_dispatch_arg_t;
+
+void *plain_dispatch_thread(void *arg_) {
+    plain_dispatch_arg_t *arg = (plain_dispatch_arg_t *)arg_;
+    char buf[4096];
+    while (1) {
+        int n = read(arg->fd, buf, sizeof(buf));
+        if (n <= 0) {
+            client_emit_data(arg->client_s, NULL, 0, true);
+            break;
+        }
+        client_emit_data(arg->client_s, (uint8_t *)buf, n, false);
+    }
+    free(arg);
     return NULL;
 }
 
@@ -255,6 +389,7 @@ static JSValue js_client_connect(JSContext *ctx, JSValueConst this_val,
 			tls = JS_ToBool( ctx, js_tls );
 			JS_FreeValue( ctx, js_tls );
 		}
+
 	  struct addrinfo hints={0}, *res, *rp;
     hints.ai_family   = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
@@ -313,14 +448,62 @@ static JSValue js_client_connect(JSContext *ctx, JSValueConst this_val,
 					return JS_UNDEFINED;
 				}else{
 					s->server_ssl_fd = SSL_get_fd(ssl);
-					create_ssl_thread( ssl, ssl_ctx, client_ssl_thread, s->fds, (void*) s );
+					create_ssl_thread( ssl, ssl_ctx, client_ssl_thread, s->fds, (void*) s, false );
 				}
 		}
+
 		JSValue arr = JS_NewArray(ctx);
 		JS_SetPropertyUint32(ctx, arr, 0, JS_NewInt32(ctx, s->fds[0]));
 		JS_SetPropertyUint32(ctx, arr, 1, JS_NewInt32(ctx, s->fds[1]));
-		//printf( "socket.c client.connect s->fds[ 0 ]: %d\n", s->fds[0] );
     return arr;
+}
+
+static JSValue js_client_start_dispatch(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JSClientData *s = JS_GetOpaque2(ctx, this_val, js_client_class_id);
+    if (!s) return JS_EXCEPTION;
+
+    if (s->fds[0] == s->fds[1]) {
+        /* plain TCP: no thread has ever read this fd — spawn now, safe handoff */
+        s->dispatch = true;
+        plain_dispatch_arg_t *pd_arg = malloc(sizeof(*pd_arg));
+        pd_arg->fd = s->fds[0];
+        pd_arg->client_s = s;
+        pthread_t tid;
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+        pthread_create(&tid, &attr, plain_dispatch_thread, pd_arg);
+        pthread_attr_destroy(&attr);
+    } else {
+        /* TLS: client_ssl_thread is already running in pipe mode — drain
+           anything it already wrote, then flip the flag, all under the
+           lock the thread itself checks before its next decision */
+        pthread_mutex_lock(&s->mode_lock);
+
+        uint8_t drain_buf[4096];
+        struct pollfd pfd = { .fd = s->fds[0], .events = POLLIN };
+        while (poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN)) {
+            int n = read(s->fds[0], drain_buf, sizeof(drain_buf));
+            if (n <= 0) break;
+            client_emit_data(s, drain_buf, n, false);
+        }
+
+        s->dispatch = true;
+        pthread_mutex_unlock(&s->mode_lock);
+    }
+    return JS_UNDEFINED;
+}
+
+
+static JSValue js_client_set_data_handler(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JSClientData *s = JS_GetOpaque2(ctx, this_val, js_client_class_id);
+    if (!s) return JS_EXCEPTION;
+    pthread_mutex_lock(&s->on_data_lock);
+    if (!JS_IsUndefined(s->on_data)) JS_FreeValue(ctx, s->on_data);
+    s->jsctx = ctx;
+    s->on_data = JS_DupValue(ctx, argv[0]);
+    pthread_mutex_unlock(&s->on_data_lock);
+    return JS_UNDEFINED;
 }
 
 static JSClassDef js_client_class = {
@@ -330,7 +513,9 @@ static JSClassDef js_client_class = {
 
 static const JSCFunctionListEntry js_client_proto_funcs[] = {
     JS_CFUNC_DEF("connect", 2, js_client_connect),
-		JS_CFUNC_DEF("end", 0, js_client_end)
+		JS_CFUNC_DEF("end", 0, js_client_end),
+		JS_CFUNC_DEF("setDataHandler", 1, js_client_set_data_handler),
+		JS_CFUNC_DEF("startDispatch", 0, js_client_start_dispatch)
 };
 
 /* Server */
@@ -487,7 +672,7 @@ void* accept_thread_func( void* arg ){
 						continue;
 				}
 
-				create_ssl_thread( ssl, ctx, server_ssl_thread, js_fds, (void*) NULL );
+				create_ssl_thread( ssl, ctx, server_ssl_thread, js_fds, (void*) NULL, false );
 				int bytes = write( accept_thread_arg->pipe_w_fd, js_fds, sizeof(js_fds) );
 				if(bytes == -1 && errno == EPIPE) {
 						printf("accept_thread_func EPIPE error on fd %d.\n", accept_thread_arg->pipe_w_fd );
@@ -623,7 +808,6 @@ static int js_socket_init(JSContext *ctx, JSModuleDef *m)
     client_class = JS_NewCFunction2(ctx, js_client_ctor, "Client", 2, JS_CFUNC_constructor, 0);
     JS_SetConstructor(ctx, client_class, client_proto);
     JS_SetClassProto(ctx, js_client_class_id, client_proto);
-
     JS_SetModuleExport(ctx, m, "Client", client_class);
 
     /* create the Server class */
@@ -635,8 +819,12 @@ static int js_socket_init(JSContext *ctx, JSModuleDef *m)
     server_class = JS_NewCFunction2(ctx, js_server_ctor, "Server", 2, JS_CFUNC_constructor, 0);
     JS_SetConstructor(ctx, server_class, server_proto);
     JS_SetClassProto(ctx, js_server_class_id, server_proto);
-
     JS_SetModuleExport(ctx, m, "Server", server_class);
+
+		JS_SetModuleExport(ctx, m, "dispatchInit",
+    JS_NewCFunction(ctx, js_dispatch_init, "dispatchInit", 0));
+		JS_SetModuleExport(ctx, m, "dispatchDrain",
+    JS_NewCFunction(ctx, js_dispatch_drain, "dispatchDrain", 0));
 
 		// JS_SetModuleExport(ctx, m, "someFunction",
     // JS_NewCFunction(ctx, js_some_function, "someFunction", 1));  // 1 = expected arg count
@@ -659,6 +847,8 @@ JSModuleDef *JS_INIT_MODULE(JSContext *ctx, const char *module_name)
         return NULL;
     JS_AddModuleExport(ctx, m, "Client");
 		JS_AddModuleExport(ctx, m, "Server");
+		JS_AddModuleExport(ctx, m, "dispatchInit");
+		JS_AddModuleExport(ctx, m, "dispatchDrain");
 		// JS_AddModuleExport(ctx, m, "someFunction"); // example of exporting a function
     return m;
 }

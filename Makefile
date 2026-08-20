@@ -42,8 +42,8 @@ webviewApp.c: webviewApp.mjs
 webviewApp.o: webviewApp.c
 	$(CC) $(CFLAGS) -c webviewApp.c -o webviewApp.o
 
-webviewApp: webviewApp.o socket.o
-	$(CC) -lc++ webviewApp.o socket.o $(LDFLAGS) -o webviewApp
+webviewApp: webviewApp.o socket.o js_dispatch.o
+	$(CC) -lc++ webviewApp.o socket.o js_dispatch.o $(LDFLAGS) -o webviewApp
 
 .PHONY: clean
 
